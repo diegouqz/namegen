@@ -1,0 +1,15 @@
+[project]
+name = "namegen"
+version = "1.0.0"
+description = "Random region-typical names for AI agents (HTTP + MCP + CLI, x402 USDC payments)"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+namegen = "namegen.cli:main"
+namegen-server = "namegen.server:main"
+namegen-mcp = "namegen.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
