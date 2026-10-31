@@ -11,7 +11,7 @@ primary_region = 'ams'
 [env]
   NAMEGEN_BASE_URL = 'https://namegen-diegouqz.fly.dev'
   NAMEGEN_NETWORK = 'base-sepolia'
-  NAMEGEN_PRICE_USDC = '0.001'
+  NAMEGEN_MIN_PRICE_USDC = '0.10'
   PORT = '8080'
 
 [http_service]
