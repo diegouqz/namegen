@@ -11,9 +11,9 @@ Endpoints de descubrimiento para agentes:
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
-from . import __version__
+from . import __version__, mcp_server
 from .core import GENDERS, MAX_COUNT, REGIONS, NamegenError, generate, list_regions
 from .payments import (PaymentConfig, PriceError, fmt, encode_settlement,
                        payment_required_body, verify_and_settle)
@@ -80,7 +80,8 @@ def agent_card():
         "capabilities": ["generate_names", "list_regions"],
         "interfaces": {
             "http": {"openapi": f"{BASE_URL}/openapi.json"},
-            "mcp": {"transport": "stdio", "command": "python -m namegen.mcp_server"},
+            "mcp": {"transport": "streamable-http", "url": f"{BASE_URL}/mcp",
+                    "local": {"transport": "stdio", "command": "python -m namegen.mcp_server"}},
             "llms_txt": f"{BASE_URL}/llms.txt",
         },
         "payment": PAY.public_info(),
@@ -134,12 +135,42 @@ Codes: REGION_REQUIRED, REGION_UNSUPPORTED, COUNT_INVALID, COUNT_OUT_OF_RANGE, G
 ## Machine-readable
 - OpenAPI: {BASE_URL}/openapi.json
 - Agent card: {BASE_URL}/.well-known/agent.json
-- MCP (stdio): python -m namegen.mcp_server  (tools: generate_names, list_regions)
+- MCP (remote, streamable HTTP): {BASE_URL}/mcp  (tools: generate_names, list_regions)
+- MCP (local, stdio): python -m namegen.mcp_server
 {pay}
 ## Usage policy
 Names are random combinations, not real people or identities. Do not use them to impersonate,
 create accounts under a fake persona, or pass identity checks.
 """
+
+
+def mcp_handle(msg):
+    """MCP remoto. Si el cobro está activo, generate_names no entrega nombres gratis:
+    devuelve el precio y la URL HTTP exacta para pagar con x402."""
+    if msg.get("method") == "tools/call" and (msg.get("params") or {}).get("name") == "generate_names" and PAY.enabled:
+        args = (msg.get("params") or {}).get("arguments") or {}
+        try:
+            generate(args.get("region"), args.get("count", 1), args.get("gender", "any"), args.get("seed"))
+            amount = PAY.resolve_amount(args.get("pay"))
+        except (NamegenError, PriceError) as e:
+            return {"jsonrpc": "2.0", "id": msg.get("id"),
+                    "result": {"content": [{"type": "text", "text": json.dumps(e.to_dict())}], "isError": True}}
+        params = {k: args[k] for k in ("region", "count", "gender", "seed", "pay") if args.get(k) not in (None, "")}
+        url = f"{BASE_URL}/v1/names?" + urlencode(params)
+        info = {
+            "payment_required": True,
+            "protocol": "x402",
+            "amount_usdc": fmt(amount),
+            "network": PAY.network,
+            "paid_url": url,
+            "how": "Send GET to paid_url. You get HTTP 402 with payment requirements; sign the USDC payment "
+                   "with an x402 client and retry the same URL with the X-PAYMENT header.",
+            "accepts": [PAY.requirements(f"{BASE_URL}/v1/names", amount)],
+        }
+        return {"jsonrpc": "2.0", "id": msg.get("id"),
+                "result": {"content": [{"type": "text", "text": json.dumps(info, ensure_ascii=False)}],
+                           "structuredContent": info, "isError": False}}
+    return mcp_server.handle(msg)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -160,6 +191,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_POST(self):
+        if urlparse(self.path).path.rstrip("/") != "/mcp":
+            return self._send(404, {"error": {"code": "NOT_FOUND", "message": "POST is only accepted on /mcp"}})
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            msg = json.loads(self.rfile.read(length).decode() or "null")
+        except (ValueError, UnicodeDecodeError):
+            return self._send(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
+        if isinstance(msg, list):  # lote JSON-RPC
+            out = [r for r in (mcp_handle(m) for m in msg if isinstance(m, dict)) if r is not None]
+            return self._send(200, out) if out else self._send(202, "", "text/plain")
+        if not isinstance(msg, dict):
+            return self._send(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
+        resp = mcp_handle(msg)
+        if resp is None:  # notificación: sin cuerpo
+            return self._send(202, "", "text/plain")
+        self._send(200, resp)
+
     def do_OPTIONS(self):
         self._send(204, "", "text/plain")
 
@@ -177,6 +226,9 @@ class Handler(BaseHTTPRequestHandler):
             "/.well-known/ai-plugin.json": lambda: self._send(200, ai_plugin()),
             "/v1/regions": lambda: self._send(200, list_regions()),
             "/v1/names": lambda: self._names(q),
+            "/mcp": lambda: self._send(405, {"error": {"code": "METHOD_NOT_ALLOWED",
+                                                       "message": "Use POST with JSON-RPC (MCP streamable HTTP)."}},
+                                       headers={"Allow": "POST"}),
         }
         handler = routes.get(url.path.rstrip("/") or "/")
         if handler:

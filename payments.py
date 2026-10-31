@@ -50,6 +50,36 @@ USDC = {
 }
 
 
+def output_schema():
+    from .core import GENDERS, MAX_COUNT, REGIONS
+    return {
+        "input": {
+            "type": "http",
+            "method": "GET",
+            "discoverable": True,
+            "queryParams": {
+                "region": {"type": "string", "required": True, "enum": sorted(REGIONS),
+                           "description": "ISO 3166-1 alpha-2 country code"},
+                "count": {"type": "integer", "minimum": 1, "maximum": MAX_COUNT, "default": 1},
+                "gender": {"type": "string", "enum": list(GENDERS), "default": "any"},
+                "seed": {"type": "string", "description": "Optional; same seed gives same names"},
+                "pay": {"type": "string", "description": "Optional USDC amount above the minimum"},
+            },
+        },
+        "output": {
+            "type": "object",
+            "properties": {
+                "schema": {"type": "string"}, "region": {"type": "string"}, "count": {"type": "integer"},
+                "synthetic": {"type": "boolean"},
+                "results": {"type": "array", "items": {"type": "object", "properties": {
+                    "full_name": {"type": "string"}, "given_name": {"type": "string"},
+                    "family_names": {"type": "array", "items": {"type": "string"}},
+                    "gender": {"type": "string"}, "locale": {"type": "string"}}}},
+            },
+        },
+    }
+
+
 class PaymentConfig:
     def __init__(self):
         self.pay_to = os.environ.get("NAMEGEN_PAY_TO", "").strip()
@@ -87,11 +117,16 @@ class PaymentConfig:
             "network": self.network,
             "maxAmountRequired": str(int(amount / MICRO)),  # en unidades mínimas de USDC
             "resource": resource_url,
-            "description": f"namegen: random region-typical names ({fmt(amount)} USDC, pay-what-you-want, min {fmt(self.min_usdc)})",
+            # Texto para catálogos de agentes: qué hace y cuándo llamarlo (máx. 500 caracteres)
+            "description": (f"Random personal names typical of a country, for fiction, placeholders and test data. "
+                            f"Pay-what-you-want: this request {fmt(amount)} USDC, minimum {fmt(self.min_usdc)}; "
+                            f"add pay=<amount> to pay more. Up to 100 names per request."),
             "mimeType": "application/json",
             "payTo": self.pay_to,
             "maxTimeoutSeconds": 60,
             "asset": USDC[self.network],
+            # Esquema de entrada/salida (x402 v1): permite que los catálogos (Bazaar) indexen el recurso
+            "outputSchema": output_schema(),
             # Dominio EIP-712 del contrato USDC en cada red
             "extra": {"name": "USD Coin" if self.network == "base" else "USDC", "version": "2"},
         }

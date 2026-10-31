@@ -17,7 +17,9 @@ TOOLS = [
         "name": "generate_names",
         "description": "Generate random personal names typical of a country/region (ISO 3166-1 alpha-2). "
                        "Output is synthetic: for fiction, placeholders and test data. "
-                       "Not for impersonation or identity verification.",
+                       "Not for impersonation or identity verification. "
+                       "On the paid remote server this returns the price and the exact URL to pay via x402 (USDC); "
+                       "pay= sets a pay-what-you-want amount above the minimum.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -25,6 +27,7 @@ TOOLS = [
                 "count": {"type": "integer", "minimum": 1, "maximum": MAX_COUNT, "default": 1},
                 "gender": {"type": "string", "enum": list(GENDERS), "default": "any"},
                 "seed": {"type": "string", "description": "Optional; same seed gives same names"},
+                "pay": {"type": "string", "description": "Optional USDC amount above the minimum (paid server only)"},
             },
             "required": ["region"],
         },

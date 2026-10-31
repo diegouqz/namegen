@@ -1,0 +1,12 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.diegouqz/namegen",
+  "title": "namegen",
+  "description": "Random personal names typical of 13 countries, for fiction, placeholders and test data. Paid per request in USDC via x402 (pay-what-you-want, min 0.10).",
+  "version": "1.1.0",
+  "repository": { "url": "https://github.com/diegouqz/namegen", "source": "github" },
+  "websiteUrl": "https://namegen-diegouqz.fly.dev/llms.txt",
+  "remotes": [
+    { "type": "streamable-http", "url": "https://namegen-diegouqz.fly.dev/mcp" }
+  ]
+}
