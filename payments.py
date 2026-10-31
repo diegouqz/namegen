@@ -17,6 +17,8 @@ Configuración por variables de entorno:
 import base64
 import json
 import os
+import urllib.error
+import urllib.parse
 import urllib.request
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
@@ -111,11 +113,35 @@ class PaymentConfig:
         }
 
 
-def _post(url, body):
-    req = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode())
+USER_AGENT = "namegen/1.0 (x402 resource server; +https://github.com/diegouqz/namegen)"
+
+
+class FacilitatorError(Exception):
+    pass
+
+
+def _post(url, body, _redirects=3):
+    """POST JSON. Se identifica con un User-Agent propio (algunos facilitators bloquean
+    'Python-urllib'), sigue redirecciones 307/308 y devuelve el motivo exacto si falla."""
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "Accept": "application/json",
+                                          "User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 307, 308) and e.headers.get("Location") and _redirects:
+            nxt = urllib.parse.urljoin(url, e.headers["Location"])
+            print(f"[namegen] facilitator redirect {e.code} -> {nxt}")
+            return _post(nxt, body, _redirects - 1)
+        detail = e.read().decode(errors="replace")[:300]
+        try:  # un facilitator puede responder 4xx con un JSON válido (p. ej. isValid:false)
+            return json.loads(detail)
+        except ValueError:
+            pass
+        print(f"[namegen] facilitator {url} -> HTTP {e.code}: {detail}")
+        raise FacilitatorError(f"HTTP {e.code} from {url}: {detail.strip()[:160]}")
 
 
 def payment_required_body(cfg, resource_url, amount=None, error="X-PAYMENT header is required"):
