@@ -7,7 +7,10 @@ Flujo:
 
 Configuración por variables de entorno:
   NAMEGEN_PAY_TO           dirección de la wallet que cobra (obligatoria para activar pagos)
-  NAMEGEN_PRICE_USDC       precio por solicitud, en USDC (default 0.001)
+  NAMEGEN_MIN_PRICE_USDC   precio mínimo por solicitud, en USDC (default 0.10).
+                           El agente puede pagar más con el parámetro ?pay=<monto> (precio a voluntad).
+                           (NAMEGEN_PRICE_USDC se acepta como nombre anterior.)
+  NAMEGEN_MAX_PRICE_USDC   tope por solicitud, evita pagos por error (default 100)
   NAMEGEN_NETWORK          base-sepolia (testnet, default) | base
   NAMEGEN_FACILITATOR_URL  default https://x402.org/facilitator
 """
@@ -15,6 +18,29 @@ import base64
 import json
 import os
 import urllib.request
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
+
+MICRO = Decimal("0.000001")  # USDC tiene 6 decimales
+
+
+def fmt(amount):
+    """0.100000 -> '0.10', 1.500000 -> '1.50', 0.250000 -> '0.25'"""
+    s = format(amount.normalize(), "f")
+    if "." not in s:
+        return s + ".00"
+    return s if len(s.split(".")[1]) >= 2 else s + "0"
+
+
+class PriceError(ValueError):
+    def __init__(self, code, message, hint=None):
+        super().__init__(message)
+        self.code, self.message, self.hint = code, message, hint
+
+    def to_dict(self):
+        d = {"error": {"code": self.code, "message": self.message}}
+        if self.hint:
+            d["error"]["hint"] = self.hint
+        return d
 
 USDC = {
     "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -25,7 +51,9 @@ USDC = {
 class PaymentConfig:
     def __init__(self):
         self.pay_to = os.environ.get("NAMEGEN_PAY_TO", "").strip()
-        self.price_usdc = float(os.environ.get("NAMEGEN_PRICE_USDC", "0.001"))
+        self.min_usdc = Decimal(os.environ.get("NAMEGEN_MIN_PRICE_USDC")
+                                or os.environ.get("NAMEGEN_PRICE_USDC") or "0.10").quantize(MICRO)
+        self.max_usdc = Decimal(os.environ.get("NAMEGEN_MAX_PRICE_USDC", "100")).quantize(MICRO)
         self.network = os.environ.get("NAMEGEN_NETWORK", "base-sepolia")
         self.facilitator = os.environ.get("NAMEGEN_FACILITATOR_URL", "https://x402.org/facilitator").rstrip("/")
         if self.network not in USDC:
@@ -35,13 +63,29 @@ class PaymentConfig:
     def enabled(self):
         return bool(self.pay_to)
 
-    def requirements(self, resource_url):
+    def resolve_amount(self, pay):
+        """Monto a cobrar: el mínimo, o lo que el agente ofrezca con ?pay= (precio a voluntad)."""
+        if pay in (None, ""):
+            return self.min_usdc
+        try:
+            amount = Decimal(str(pay)).quantize(MICRO, rounding=ROUND_DOWN)
+        except InvalidOperation:
+            raise PriceError("PAY_INVALID", "'pay' must be a decimal amount in USDC, e.g. 0.25")
+        if amount < self.min_usdc:
+            raise PriceError("PAY_BELOW_MINIMUM", f"'pay' must be at least {fmt(self.min_usdc)} USDC.",
+                             f"Omit 'pay' to pay the minimum ({fmt(self.min_usdc)} USDC).")
+        if amount > self.max_usdc:
+            raise PriceError("PAY_ABOVE_MAXIMUM", f"'pay' must be at most {fmt(self.max_usdc)} USDC.")
+        return amount
+
+    def requirements(self, resource_url, amount=None):
+        amount = self.min_usdc if amount is None else amount
         return {
             "scheme": "exact",
             "network": self.network,
-            "maxAmountRequired": str(round(self.price_usdc * 1_000_000)),  # USDC tiene 6 decimales
+            "maxAmountRequired": str(int(amount / MICRO)),  # en unidades mínimas de USDC
             "resource": resource_url,
-            "description": "namegen: random region-typical names (per request)",
+            "description": f"namegen: random region-typical names ({fmt(amount)} USDC, pay-what-you-want, min {fmt(self.min_usdc)})",
             "mimeType": "application/json",
             "payTo": self.pay_to,
             "maxTimeoutSeconds": 60,
@@ -57,7 +101,9 @@ class PaymentConfig:
             "x402Version": 1,
             "asset": "USDC",
             "network": self.network,
-            "price_per_request_usdc": self.price_usdc,
+            "pricing": {"model": "pay_what_you_want", "currency": "USDC",
+                        "min_per_request": float(self.min_usdc), "max_per_request": float(self.max_usdc),
+                        "how": "Add ?pay=<amount> to pay more than the minimum. Omit it to pay the minimum."},
             "pay_to": self.pay_to or None,
             "header": "X-PAYMENT",
             "free_endpoints": ["/", "/llms.txt", "/openapi.json", "/.well-known/agent.json",
@@ -72,18 +118,18 @@ def _post(url, body):
         return json.loads(resp.read().decode())
 
 
-def payment_required_body(cfg, resource_url, error="X-PAYMENT header is required"):
-    return {"x402Version": 1, "error": error, "accepts": [cfg.requirements(resource_url)]}
+def payment_required_body(cfg, resource_url, amount=None, error="X-PAYMENT header is required"):
+    return {"x402Version": 1, "error": error, "accepts": [cfg.requirements(resource_url, amount)]}
 
 
-def verify_and_settle(cfg, header_value, resource_url):
+def verify_and_settle(cfg, header_value, resource_url, amount=None):
     """Devuelve (ok, settle_response | error_message)."""
     try:
         payload = json.loads(base64.b64decode(header_value).decode())
     except Exception:
         return False, "X-PAYMENT is not valid base64-encoded JSON"
     body = {"x402Version": 1, "paymentPayload": payload,
-            "paymentRequirements": cfg.requirements(resource_url)}
+            "paymentRequirements": cfg.requirements(resource_url, amount)}
     try:
         v = _post(cfg.facilitator + "/verify", body)
         if not v.get("isValid"):

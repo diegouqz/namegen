@@ -15,8 +15,8 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .core import GENDERS, MAX_COUNT, REGIONS, NamegenError, generate, list_regions
-from .payments import (PaymentConfig, encode_settlement, payment_required_body,
-                       verify_and_settle)
+from .payments import (PaymentConfig, PriceError, fmt, encode_settlement,
+                       payment_required_body, verify_and_settle)
 
 PAY = PaymentConfig()
 BASE_URL = "http://localhost:8080"
@@ -42,6 +42,10 @@ def openapi():
                                                                  "default": "any"}},
                     {"name": "seed", "in": "query", "description": "Optional; same seed => same output",
                      "schema": {"type": "string"}},
+                    {"name": "pay", "in": "query",
+                     "description": f"Optional. Pay-what-you-want amount in USDC (min {fmt(PAY.min_usdc)}). "
+                                    "Omit to pay the minimum. Use the same value on the paid retry.",
+                     "schema": {"type": "string", "example": fmt(PAY.min_usdc)}},
                 ],
                 "responses": {
                     "200": {"description": "Names", "content": {"application/json": {"schema": {
@@ -99,10 +103,12 @@ def ai_plugin():
 def llms_txt():
     pay = ""
     if PAY.enabled:
-        pay = (f"\n## Payment (x402)\n"
-               f"- /v1/names costs {PAY.price_usdc} USDC per request on {PAY.network}.\n"
+        pay = (f"\n## Payment (x402, pay-what-you-want)\n"
+               f"- /v1/names costs at least {fmt(PAY.min_usdc)} USDC per request, paid in USDC on {PAY.network}.\n"
+               f"- To pay more, add `pay=<amount>` (e.g. `&pay=0.25`). Omit it to pay the minimum.\n"
                f"- First call returns HTTP 402 with `accepts` (payTo, asset, maxAmountRequired).\n"
-               f"- Sign the payment with an x402 client and retry with header `X-PAYMENT`.\n"
+               f"- Sign the payment with an x402 client and retry the SAME URL with header `X-PAYMENT`.\n"
+               f"- Price errors: PAY_INVALID, PAY_BELOW_MINIMUM, PAY_ABOVE_MAXIMUM (HTTP 400, nothing charged).\n"
                f"- Free: /v1/regions, /openapi.json, /llms.txt, /.well-known/agent.json\n")
     return f"""# namegen
 
@@ -187,13 +193,17 @@ class Handler(BaseHTTPRequestHandler):
 
         extra = {}
         if PAY.enabled:
+            try:
+                amount = PAY.resolve_amount(q.get("pay"))
+            except PriceError as e:
+                return self._send(400, e.to_dict())
             resource = f"{BASE_URL}/v1/names"
             header = self.headers.get("X-PAYMENT")
             if not header:
-                return self._send(402, payment_required_body(PAY, resource))
-            ok, info = verify_and_settle(PAY, header, resource)
+                return self._send(402, payment_required_body(PAY, resource, amount))
+            ok, info = verify_and_settle(PAY, header, resource, amount)
             if not ok:
-                return self._send(402, payment_required_body(PAY, resource, info))
+                return self._send(402, payment_required_body(PAY, resource, amount, info))
             extra["X-PAYMENT-RESPONSE"] = encode_settlement(info)
         self._send(200, result, headers=extra)
 
@@ -212,7 +222,7 @@ def main():
     a = ap.parse_args()
     BASE_URL = (a.base_url or f"http://localhost:{a.port}").rstrip("/")
     print(f"namegen {__version__} on {a.host}:{a.port} | base_url={BASE_URL} | "
-          f"payments={'x402 ' + PAY.network + ' ' + str(PAY.price_usdc) + ' USDC' if PAY.enabled else 'off'}")
+          f"payments={'x402 ' + PAY.network + ' min ' + fmt(PAY.min_usdc) + ' USDC (pay-what-you-want)' if PAY.enabled else 'off'}")
     ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
 
 
