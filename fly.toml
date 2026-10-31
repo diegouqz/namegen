@@ -1,30 +1,34 @@
-# Cambiá "namegen-diegouqz" por un nombre único; la URL pública será https://<app>.fly.dev
-app = "namegen-diegouqz"
-primary_region = "eze"   # Buenos Aires
+# fly.toml app configuration file generated for namegen-diegouqz on 2026-10-31T19:05:58Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'namegen-diegouqz'
+primary_region = 'ams'
 
 [build]
 
 [env]
-  PORT = "8080"
-  NAMEGEN_BASE_URL = "https://namegen-diegouqz.fly.dev"
-  NAMEGEN_NETWORK = "base-sepolia"
-  NAMEGEN_PRICE_USDC = "0.001"
-  # NAMEGEN_PAY_TO se define como secret: fly secrets set NAMEGEN_PAY_TO=0xTuWallet
+  NAMEGEN_BASE_URL = 'https://namegen-diegouqz.fly.dev'
+  NAMEGEN_NETWORK = 'base-sepolia'
+  NAMEGEN_PRICE_USDC = '0.001'
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
 
   [[http_service.checks]]
-    method = "GET"
-    path = "/health"
-    interval = "30s"
-    timeout = "5s"
+    interval = '30s'
+    timeout = '5s'
+    method = 'GET'
+    path = '/health'
 
 [[vm]]
-  memory = "256mb"
-  cpu_kind = "shared"
+  memory = '256mb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 256
