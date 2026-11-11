@@ -58,8 +58,9 @@ def output_schema():
             "method": "GET",
             "discoverable": True,
             "queryParams": {
-                "region": {"type": "string", "required": True, "enum": sorted(REGIONS),
-                           "description": "ISO 3166-1 alpha-2 country code"},
+                "region": {"type": "string", "required": True,
+                           "description": "ISO 3166-1 alpha-2 code, or several comma-separated (e.g. AR,MX,BR). "
+                                          "Supported: " + ",".join(sorted(REGIONS))},
                 "count": {"type": "integer", "minimum": 1, "maximum": MAX_COUNT, "default": 1},
                 "gender": {"type": "string", "enum": list(GENDERS), "default": "any"},
                 "seed": {"type": "string", "description": "Optional; same seed gives same names"},
@@ -80,6 +81,18 @@ def output_schema():
     }
 
 
+def pack_schema():
+    from .credits import PACK_SIZES
+    return {
+        "input": {"type": "http", "method": "GET", "discoverable": True,
+                  "queryParams": {"size": {"type": "integer", "required": True, "enum": list(PACK_SIZES),
+                                           "description": "Number of prepaid queries"}}},
+        "output": {"type": "object", "properties": {
+            "token": {"type": "string", "description": "Send as 'Authorization: Bearer <token>'"},
+            "credits": {"type": "integer"}}},
+    }
+
+
 class PaymentConfig:
     def __init__(self):
         self.pay_to = os.environ.get("NAMEGEN_PAY_TO", "").strip()
@@ -95,22 +108,28 @@ class PaymentConfig:
     def enabled(self):
         return bool(self.pay_to)
 
-    def resolve_amount(self, pay):
-        """Monto a cobrar: el mínimo, o lo que el agente ofrezca con ?pay= (precio a voluntad)."""
+    def pack_price(self, size):
+        """Precio de un paquete: mínimo por consulta × cantidad de consultas."""
+        return (self.min_usdc * int(size)).quantize(MICRO)
+
+    def resolve_amount(self, pay, units=1):
+        """Monto a cobrar: el mínimo × unidades (regiones pedidas), o lo que el agente ofrezca
+        con ?pay= (precio a voluntad), que no puede ser menor."""
+        base = (self.min_usdc * int(units)).quantize(MICRO)
         if pay in (None, ""):
-            return self.min_usdc
+            return base
         try:
             amount = Decimal(str(pay)).quantize(MICRO, rounding=ROUND_DOWN)
         except InvalidOperation:
             raise PriceError("PAY_INVALID", "'pay' must be a decimal amount in USDC, e.g. 0.25")
-        if amount < self.min_usdc:
-            raise PriceError("PAY_BELOW_MINIMUM", f"'pay' must be at least {fmt(self.min_usdc)} USDC.",
-                             f"Omit 'pay' to pay the minimum ({fmt(self.min_usdc)} USDC).")
-        if amount > self.max_usdc:
-            raise PriceError("PAY_ABOVE_MAXIMUM", f"'pay' must be at most {fmt(self.max_usdc)} USDC.")
+        if amount < base:
+            raise PriceError("PAY_BELOW_MINIMUM", f"'pay' must be at least {fmt(base)} USDC for this request.",
+                             f"Omit 'pay' to pay the minimum ({fmt(base)} USDC).")
+        if amount > max(self.max_usdc, base):
+            raise PriceError("PAY_ABOVE_MAXIMUM", f"'pay' must be at most {fmt(max(self.max_usdc, base))} USDC.")
         return amount
 
-    def requirements(self, resource_url, amount=None):
+    def requirements(self, resource_url, amount=None, description=None, schema=None):
         amount = self.min_usdc if amount is None else amount
         return {
             "scheme": "exact",
@@ -118,15 +137,17 @@ class PaymentConfig:
             "maxAmountRequired": str(int(amount / MICRO)),  # en unidades mínimas de USDC
             "resource": resource_url,
             # Texto para catálogos de agentes: qué hace y cuándo llamarlo (máx. 500 caracteres)
-            "description": (f"Random personal names typical of a country, for fiction, placeholders and test data. "
-                            f"Pay-what-you-want: this request {fmt(amount)} USDC, minimum {fmt(self.min_usdc)}; "
-                            f"add pay=<amount> to pay more. Up to 100 names per request."),
+            "description": description or (
+                f"Random personal names typical of a country, for fiction, placeholders and test data. "
+                f"This request {fmt(amount)} USDC (minimum {fmt(self.min_usdc)} per region; pay=<amount> to pay more). "
+                f"Up to 100 names per region; several regions per request (region=AR,MX). "
+                f"Prepaid packs at /v1/packs."),
             "mimeType": "application/json",
             "payTo": self.pay_to,
             "maxTimeoutSeconds": 60,
             "asset": USDC[self.network],
             # Esquema de entrada/salida (x402 v1): permite que los catálogos (Bazaar) indexen el recurso
-            "outputSchema": output_schema(),
+            "outputSchema": schema or output_schema(),
             # Dominio EIP-712 del contrato USDC en cada red
             "extra": {"name": "USD Coin" if self.network == "base" else "USDC", "version": "2"},
         }
@@ -139,8 +160,8 @@ class PaymentConfig:
             "asset": "USDC",
             "network": self.network,
             "pricing": {"model": "pay_what_you_want", "currency": "USDC",
-                        "min_per_request": float(self.min_usdc), "max_per_request": float(self.max_usdc),
-                        "how": "Add ?pay=<amount> to pay more than the minimum. Omit it to pay the minimum."},
+                        "min_per_region": float(self.min_usdc), "max_per_request": float(self.max_usdc),
+                        "how": "Price = minimum x number of regions requested. Add ?pay=<amount> to pay more."},
             "pay_to": self.pay_to or None,
             "header": "X-PAYMENT",
             "free_endpoints": ["/", "/llms.txt", "/openapi.json", "/.well-known/agent.json",
@@ -179,18 +200,18 @@ def _post(url, body, _redirects=3):
         raise FacilitatorError(f"HTTP {e.code} from {url}: {detail.strip()[:160]}")
 
 
-def payment_required_body(cfg, resource_url, amount=None, error="X-PAYMENT header is required"):
-    return {"x402Version": 1, "error": error, "accepts": [cfg.requirements(resource_url, amount)]}
+def payment_required_body(cfg, resource_url, amount=None, error="X-PAYMENT header is required", **req):
+    return {"x402Version": 1, "error": error, "accepts": [cfg.requirements(resource_url, amount, **req)]}
 
 
-def verify_and_settle(cfg, header_value, resource_url, amount=None):
+def verify_and_settle(cfg, header_value, resource_url, amount=None, **req):
     """Devuelve (ok, settle_response | error_message)."""
     try:
         payload = json.loads(base64.b64decode(header_value).decode())
     except Exception:
         return False, "X-PAYMENT is not valid base64-encoded JSON"
     body = {"x402Version": 1, "paymentPayload": payload,
-            "paymentRequirements": cfg.requirements(resource_url, amount)}
+            "paymentRequirements": cfg.requirements(resource_url, amount, **req)}
     try:
         v = _post(cfg.facilitator + "/verify", body)
         if not v.get("isValid"):

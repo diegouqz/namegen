@@ -49,6 +49,51 @@ def list_regions():
     }
 
 
+MAX_REGIONS_PER_REQUEST = 13
+
+
+def parse_regions(region):
+    """'AR' | 'AR,MX' | ['AR','MX'] -> lista de códigos válidos, sin repetidos, en orden."""
+    if isinstance(region, (list, tuple)):
+        parts = [str(p) for p in region]
+    else:
+        parts = str(region or "").split(",")
+    parts = [p.strip() for p in parts if p and p.strip()]
+    if not parts:
+        resolve_region(None)  # lanza REGION_REQUIRED
+    codes = []
+    for p in parts:
+        c = resolve_region(p)
+        if c not in codes:
+            codes.append(c)
+    if len(codes) > MAX_REGIONS_PER_REQUEST:
+        raise NamegenError("TOO_MANY_REGIONS", f"At most {MAX_REGIONS_PER_REQUEST} regions per request.")
+    return codes
+
+
+def generate_multi(region, count=1, gender="any", seed=None):
+    """Como generate(), pero acepta varias regiones ('AR,MX,BR'): `count` nombres por región.
+    Devuelve (resultado, unidades) donde unidades = cantidad de regiones (lo que se cobra)."""
+    codes = parse_regions(region)
+    if len(codes) == 1:
+        out = generate(codes[0], count, gender, seed)
+        out["regions"] = codes
+        return out, 1
+    parts = [generate(c, count, gender, None if seed in (None, "") else f"{seed}:{c}") for c in codes]
+    first = parts[0]
+    return {
+        "schema": SCHEMA_VERSION,
+        "region": ",".join(codes),
+        "regions": codes,
+        "count": first["count"],
+        "total": sum(len(p["results"]) for p in parts),
+        "seed": first["seed"] and str(seed),
+        "synthetic": True,
+        "notice": first["notice"],
+        "results": [r for p in parts for r in p["results"]],
+    }, len(codes)
+
+
 def generate(region, count=1, gender="any", seed=None):
     """Devuelve `count` nombres aleatorios típicos de `region`.
 
