@@ -237,6 +237,12 @@ class Handler(BaseHTTPRequestHandler):
                                    "hint": f"See {BASE_URL}/openapi.json"}})
 
     def _names(self, q):
+        # Sondeo de descubrimiento: los catálogos x402 piden la URL sin parámetros y esperan un 402.
+        # Se responde con el precio mínimo; nada se cobra, porque un pago sin 'region' se rechaza abajo.
+        if PAY.enabled and not q and not self.headers.get("X-PAYMENT"):
+            body = payment_required_body(PAY, f"{BASE_URL}/v1/names")
+            body["hint"] = "Add ?region=<ISO code> (e.g. ?region=AR&count=3), then pay and retry the same URL."
+            return self._send(402, body)
         # Validar antes de cobrar: un agente no paga por una solicitud mal formada.
         try:
             result = generate(q.get("region"), q.get("count", 1), q.get("gender", "any"), q.get("seed"))
