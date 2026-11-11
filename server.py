@@ -260,7 +260,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, result, headers=extra)
 
     def log_message(self, fmt, *args):
-        print(f"[namegen] {self.address_string()} {fmt % args}")
+        # Los chequeos de salud de Fly llenan el registro sin aportar nada: no se anotan.
+        if self.path.startswith("/health"):
+            return
+        # Detrás del proxy de Fly, la IP real del visitante llega en Fly-Client-IP.
+        ip = (self.headers.get("Fly-Client-IP")
+              or (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+              or self.address_string())
+        ua = (self.headers.get("User-Agent") or "-").replace('"', "'")[:120]
+        country = self.headers.get("Fly-Region") or "-"
+        print(f"[namegen] ip={ip} edge={country} {fmt % args} ua=\"{ua}\"")
 
 
 def main():
@@ -275,7 +284,11 @@ def main():
     BASE_URL = (a.base_url or f"http://localhost:{a.port}").rstrip("/")
     print(f"namegen {__version__} on {a.host}:{a.port} | base_url={BASE_URL} | "
           f"payments={'x402 ' + PAY.network + ' min ' + fmt(PAY.min_usdc) + ' USDC (pay-what-you-want)' if PAY.enabled else 'off'}")
-    ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
+    try:
+        ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
+    except KeyboardInterrupt:
+        # Fly apaga la máquina por inactividad con SIGINT: es un cierre normal.
+        print("namegen stopped (idle shutdown)")
 
 
 if __name__ == "__main__":
