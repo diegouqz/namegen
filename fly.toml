@@ -12,7 +12,7 @@ primary_region = 'ams'
   NAMEGEN_BASE_URL = 'https://namegen-diegouqz.fly.dev'
   NAMEGEN_NETWORK = 'base'
   NAMEGEN_FACILITATOR_URL = 'https://facilitator.payai.network'
-  NAMEGEN_MIN_PRICE_USDC = '0.10'
+  NAMEGEN_MIN_PRICE_USDC = '0.001'
   PORT = '8080'
 
 [http_service]
