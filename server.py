@@ -301,6 +301,30 @@ def mcp_handle(msg):
     return mcp_server.handle(msg)
 
 
+def mcp_summary(msg):
+    """Resumen corto de lo que hizo una visita MCP, para el registro.
+    Ej: 'initialize(client:claude-ai/1.0)', 'tools/list', 'call:generate_names(region:AR,count:3,token:yes)'."""
+    def one(m):
+        if not isinstance(m, dict):
+            return "invalid"
+        method = str(m.get("method") or "response")
+        p = m.get("params") or {}
+        if method == "initialize":
+            ci = p.get("clientInfo") or {}
+            client = f"{ci.get('name', '?')}/{ci.get('version', '?')}".replace(" ", "_")[:60]
+            return f"initialize(client:{client})"
+        if method == "tools/call":
+            a = p.get("arguments") or {}
+            bits = [f"{k}:{str(a[k]).replace(' ', '')[:40]}" for k in ("region", "regions", "count", "size")
+                    if a.get(k) not in (None, "")]
+            if a.get("token"):
+                bits.append("token:yes")
+            return f"call:{p.get('name', '?')}({','.join(bits)})"
+        return method
+    items = msg if isinstance(msg, list) else [msg]
+    return "+".join(one(m) for m in items)[:200]
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"namegen/{__version__}"
 
@@ -333,6 +357,7 @@ class Handler(BaseHTTPRequestHandler):
             msg = json.loads(self.rfile.read(length).decode() or "null")
         except (ValueError, UnicodeDecodeError):
             return self._send(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
+        self._mcp_note = mcp_summary(msg)
         if isinstance(msg, list):  # lote JSON-RPC
             out = [r for r in (mcp_handle(m) for m in msg if isinstance(m, dict)) if r is not None]
             return self._send(200, out) if out else self._send(202, "", "text/plain")
@@ -493,7 +518,9 @@ class Handler(BaseHTTPRequestHandler):
         ua = (self.headers.get("User-Agent") or "-").replace('"', "'")[:120]
         edge = self.headers.get("Fly-Region") or "-"
         paid = "token" if self._token() else ("x402" if self.headers.get("X-PAYMENT") else "-")
-        print(f"[namegen] ip={ip} edge={edge} pay={paid} {fmt_ % args} ua=\"{ua}\"")
+        note = getattr(self, "_mcp_note", None)
+        mcp = f" mcp={note}" if note else ""
+        print(f"[namegen] ip={ip} edge={edge} pay={paid} {fmt_ % args}{mcp} ua=\"{ua}\"")
 
 
 def main():
